@@ -1,5 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { analyzeRules } from '../domain/ruleAnalysis';
+import { buildRemediationPlan } from '../domain/ruleRemediation';
 import type { RuleProject, WorkspaceDocument } from '../models/ruleModel';
 import type { CheckOperation } from '../services/ruleCheckService';
 import { RuleWorkspaceViewModel } from '../viewmodels/workspaceViewModel';
@@ -22,7 +23,8 @@ class FakeChecker {
       this.nextError = null;
       return { promise: Promise.reject(error), cancel: () => { this.cancelled = true; } };
     }
-    return { promise: Promise.resolve(analyzeRules(project)), cancel: () => { this.cancelled = true; } };
+    const analysis = analyzeRules(project);
+    return { promise: Promise.resolve({ analysis, plan: buildRemediationPlan(project, analysis) }), cancel: () => { this.cancelled = true; } };
   }
 }
 
@@ -82,8 +84,7 @@ describe('RuleWorkspaceViewModel', () => {
     workspace.dispose();
   });
 
-  it('saves versions, freezes and resumes a version, and copies it into a new project', async () => {
-    const workspace = new RuleWorkspaceViewModel(new MemoryRepository(), new FakeChecker());
+  it('saves versions, freezes and resumes a version, and copies it into a new project', async () => {    const workspace = new RuleWorkspaceViewModel(new MemoryRepository(), new FakeChecker());
     await workspace.start();
     workspace.saveVersion();
     const savedVersion = workspace.getSnapshot().project?.versions[0];
@@ -99,6 +100,53 @@ describe('RuleWorkspaceViewModel', () => {
     workspace.copyVersionToProject(savedVersion?.id ?? '');
     expect(workspace.getSnapshot().workspace?.projects).toHaveLength(2);
     expect(workspace.getSnapshot().project?.fields).toHaveLength(3);
+    workspace.dispose();
+  });
+
+  it('applies only selected remedies, leaves other rules untouched, and reports before/after metrics', async () => {
+    const workspace = new RuleWorkspaceViewModel(new MemoryRepository(), new FakeChecker());
+    await workspace.start();
+    await vi.advanceTimersByTimeAsync(50);
+    expect(workspace.getSnapshot().checkStatus).toBe('success');
+    const plan = workspace.getSnapshot().remediationPlan;
+    expect(plan).not.toBeNull();
+    expect(plan!.suggestions.length).toBeGreaterThan(0);
+
+    const beforeRules = JSON.stringify(workspace.getSnapshot().project?.rules);
+    const beforeConflictCount = workspace.getSnapshot().analysis?.overlaps.filter((overlap) => overlap.conflict).length ?? 0;
+    expect(beforeConflictCount).toBeGreaterThan(0);
+
+    // 只采纳冲突重排建议，不采纳遮蔽/收窄/放宽建议。
+    const conflictSuggestion = plan!.suggestions.find((suggestion) => suggestion.category === 'conflict');
+    expect(conflictSuggestion).toBeDefined();
+    const untouchedTitles = plan!.suggestions
+      .filter((suggestion) => suggestion.id !== conflictSuggestion!.id)
+      .map((suggestion) => suggestion.title);
+    const ok = workspace.applyRemedies([conflictSuggestion!.id]);
+    expect(ok).toBe(true);
+
+    const report = workspace.getSnapshot().remediationReport;
+    expect(report).not.toBeNull();
+    expect(report!.applied).toHaveLength(1);
+    expect(report!.before.conflictCount).toBe(beforeConflictCount);
+    expect(report!.applied[0].title).toBe(conflictSuggestion!.title);
+
+    await vi.advanceTimersByTimeAsync(250);
+    expect(workspace.getSnapshot().checkStatus).toBe('success');
+    const afterAnalysis = workspace.getSnapshot().analysis;
+    expect(afterAnalysis?.overlaps.filter((overlap) => overlap.conflict)).toHaveLength(0);
+
+    // 未被采纳的建议没有改动规则：除冲突补丁涉及的规则优先级外，其余规则与之前一致。
+    const rulesById = new Map(workspace.getSnapshot().project?.rules.map((rule) => [rule.id, rule]));
+    const beforeById = new Map((JSON.parse(beforeRules) as RuleProject['rules']).map((rule) => [rule.id, rule]));
+    for (const [id, beforeRule] of beforeById) {
+      const afterRule = rulesById.get(id);
+      expect(afterRule).toBeDefined();
+      if (conflictSuggestion!.affectedRuleIds.includes(id)) continue;
+      expect(afterRule!.priority).toBe(beforeRule.priority);
+      expect(JSON.stringify(afterRule!.conditions)).toBe(JSON.stringify(beforeRule.conditions));
+    }
+    expect(untouchedTitles.length).toBeGreaterThan(0);
     workspace.dispose();
   });
 });

@@ -93,8 +93,61 @@ export interface RuleAnalysis {
   overlaps: RuleOverlap[];
   unreachableRuleIds: string[];
   shadowedRuleIds: string[];
+  shadowedBlockers: Record<string, string>;
   uncoveredExamples: SampleInput[];
   truncated: boolean;
+}
+
+export type RemedyCategory = 'conflict' | 'overlap' | 'shadowed' | 'unreachable' | 'duplicate';
+export type RemedyKind = 'reorder' | 'narrow' | 'merge' | 'widen' | 'remove-condition';
+
+export type RulePatch =
+  | { type: 'set-priority'; ruleId: string; priority: number }
+  | { type: 'add-predicate'; ruleId: string; predicate: PredicateCondition }
+  | { type: 'replace-predicate'; ruleId: string; predicate: PredicateCondition; next: PredicateCondition }
+  | { type: 'remove-predicate'; ruleId: string; predicate: PredicateCondition }
+  | { type: 'merge-rules'; ruleIds: string[]; keepRuleId: string; result: string };
+
+export interface RemedyMetrics {
+  coveragePercent: number;
+  conflictCount: number;
+  overlapCount: number;
+  unreachableCount: number;
+  shadowedCount: number;
+}
+
+export interface RemedySuggestion {
+  id: string;
+  category: RemedyCategory;
+  kind: RemedyKind;
+  title: string;
+  rationale: string;
+  affectedRuleIds: string[];
+  resolves: string[];
+  patch: RulePatch;
+  projected: RemedyMetrics;
+}
+
+export interface RemediationPlan {
+  suggestions: RemedySuggestion[];
+  manualCount: number;
+}
+
+export interface AppliedRemedy {
+  suggestionId: string;
+  title: string;
+}
+
+export interface RemediationReport {
+  appliedAt: number;
+  applied: AppliedRemedy[];
+  skippedCount: number;
+  before: RemedyMetrics;
+}
+
+export interface CheckResult {
+  analysis: RuleAnalysis;
+  plan: RemediationPlan;
 }
 
 export interface SampleEvaluation {

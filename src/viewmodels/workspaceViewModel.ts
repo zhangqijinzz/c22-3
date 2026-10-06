@@ -1,7 +1,10 @@
 import { evaluateSample } from '../domain/conditionEvaluator';
 import { ruleDomain } from '../domain/ruleDomain';
+import { applyRemedyPatches, metricsFromAnalysis } from '../domain/ruleRemediation';
 import type {
   ModuleId,
+  RemediationPlan,
+  RemediationReport,
   RuleAnalysis,
   RuleProject,
   SampleEvaluation,
@@ -24,6 +27,8 @@ export interface WorkspaceState {
   activeModule: ModuleId;
   checkStatus: CheckStatus;
   analysis: RuleAnalysis | null;
+  remediationPlan: RemediationPlan | null;
+  remediationReport: RemediationReport | null;
   validationIssues: ReturnType<typeof ruleDomain.validateProject>;
   sampleEvaluation: SampleEvaluation | null;
   selectedRuleId?: string;
@@ -39,6 +44,7 @@ export class RuleWorkspaceViewModel implements WorkspacePort {
   private state: WorkspaceState = {
     phase: 'loading', persistence: 'idle', workspace: null, project: null,
     activeModule: 'inspection', checkStatus: 'idle', analysis: null,
+    remediationPlan: null, remediationReport: null,
     validationIssues: [], sampleEvaluation: null, notice: '正在恢复本地规则项目…',
   };
   private readonly listeners = new Set<Listener>();
@@ -127,10 +133,10 @@ export class RuleWorkspaceViewModel implements WorkspacePort {
     try {
       const operation = this.checker.run(project);
       this.checkOperation = operation;
-      const analysis = await operation.promise;
+      const result = await operation.promise;
       if (revision !== this.checkRevision) return;
       this.checkOperation = undefined;
-      this.publish({ ...this.state, phase: 'ready', checkStatus: 'success', analysis, notice: `检查完成：已分析 ${analysis.checkedCases.toLocaleString('zh-CN')} 个逻辑分区` });
+      this.publish({ ...this.state, phase: 'ready', checkStatus: 'success', analysis: result.analysis, remediationPlan: result.plan, notice: `检查完成：已分析 ${result.analysis.checkedCases.toLocaleString('zh-CN')} 个逻辑分区，生成 ${result.plan.suggestions.length} 条处置建议` });
     } catch (error) {
       if (revision !== this.checkRevision) return;
       this.checkOperation = undefined;
@@ -154,12 +160,36 @@ export class RuleWorkspaceViewModel implements WorkspacePort {
     }
   }
 
+  applyRemedies(suggestionIds: string[]): boolean {
+    const project = this.state.project;
+    const plan = this.state.remediationPlan;
+    const analysis = this.state.analysis;
+    if (!project || !plan || !analysis || project.frozenVersionId || suggestionIds.length === 0) return false;
+    const selected = plan.suggestions.filter((suggestion) => suggestionIds.includes(suggestion.id));
+    if (selected.length === 0) return false;
+    const before = metricsFromAnalysis(analysis);
+    const { project: patched, skipped } = applyRemedyPatches(project, selected.map((suggestion) => suggestion.patch));
+    const report: RemediationReport = {
+      appliedAt: Date.now(),
+      applied: selected.map((suggestion) => ({ suggestionId: suggestion.id, title: suggestion.title })),
+      skippedCount: skipped,
+      before,
+    };
+    const committed = this.commitProject(patched, `已采纳 ${selected.length} 条处置建议，正在自动重算…`, { recheck: true });
+    if (committed) this.updateView({ remediationReport: report });
+    return committed;
+  }
+
+  dismissRemediationReport(): void {
+    this.updateView({ remediationReport: null });
+  }
+
   createProject(): void {
     const workspace = this.state.workspace;
     if (!workspace) return;
     const project = createBlankProject(workspace.projects.length + 1);
     const next: WorkspaceDocument = { ...workspace, projects: [...workspace.projects, project], activeProjectId: project.id };
-    this.publish({ ...this.state, workspace: next, project, phase: 'validating', activeModule: 'fields', analysis: null, checkStatus: 'idle', validationIssues: ruleDomain.validateProject(project), sampleEvaluation: evaluateSample(project, project.sampleInputs), selectedRuleId: undefined, notice: '空项目已创建。先定义字段，再添加规则。' });
+    this.publish({ ...this.state, workspace: next, project, phase: 'validating', activeModule: 'fields', analysis: null, remediationPlan: null, remediationReport: null, checkStatus: 'idle', validationIssues: ruleDomain.validateProject(project), sampleEvaluation: evaluateSample(project, project.sampleInputs), selectedRuleId: undefined, notice: '空项目已创建。先定义字段，再添加规则。' });
     this.scheduleSave(next);
   }
 
@@ -170,7 +200,7 @@ export class RuleWorkspaceViewModel implements WorkspacePort {
     this.cancelCheck();
     const next = { ...workspace, activeProjectId: projectId };
     const issues = ruleDomain.validateProject(project);
-    this.publish({ ...this.state, workspace: next, project, phase: issues.length ? 'validating' : 'editing', activeModule: 'inspection', checkStatus: issues.length ? 'idle' : 'scheduled', analysis: null, validationIssues: issues, sampleEvaluation: evaluateSample(project, project.sampleInputs), selectedRuleId: project.rules[0]?.id, notice: `已切换到“${project.title}”` });
+    this.publish({ ...this.state, workspace: next, project, phase: issues.length ? 'validating' : 'editing', activeModule: 'inspection', checkStatus: issues.length ? 'idle' : 'scheduled', analysis: null, remediationPlan: null, remediationReport: null, validationIssues: issues, sampleEvaluation: evaluateSample(project, project.sampleInputs), selectedRuleId: project.rules[0]?.id, notice: `已切换到“${project.title}”` });
     this.scheduleSave(next);
     if (!issues.length) this.scheduleCheck(80);
   }
@@ -209,7 +239,7 @@ export class RuleWorkspaceViewModel implements WorkspacePort {
     };
     const next = { ...workspace, projects: [...workspace.projects, project], activeProjectId: project.id };
     const issues = ruleDomain.validateProject(project);
-    this.publish({ ...this.state, workspace: next, project, phase: issues.length ? 'validating' : 'editing', activeModule: 'rules', checkStatus: issues.length ? 'idle' : 'scheduled', analysis: null, validationIssues: issues, sampleEvaluation: evaluateSample(project, project.sampleInputs), selectedRuleId: project.rules[0]?.id, notice: `已复制版本到项目“${project.title}”` });
+    this.publish({ ...this.state, workspace: next, project, phase: issues.length ? 'validating' : 'editing', activeModule: 'rules', checkStatus: issues.length ? 'idle' : 'scheduled', analysis: null, remediationPlan: null, remediationReport: null, validationIssues: issues, sampleEvaluation: evaluateSample(project, project.sampleInputs), selectedRuleId: project.rules[0]?.id, notice: `已复制版本到项目“${project.title}”` });
     this.scheduleSave(next);
     if (!issues.length) this.scheduleCheck(80);
   }
@@ -221,7 +251,7 @@ export class RuleWorkspaceViewModel implements WorkspacePort {
       const workspace = saved ?? createDemoWorkspace();
       const project = workspace.projects.find((candidate) => candidate.id === workspace.activeProjectId) ?? workspace.projects[0];
       const issues = ruleDomain.validateProject(project);
-      this.publish({ ...this.state, workspace, project, phase: issues.length ? 'validating' : 'editing', persistence: saved ? 'saved' : 'saving', activeModule: 'inspection', checkStatus: issues.length ? 'idle' : 'scheduled', validationIssues: issues, analysis: null, sampleEvaluation: evaluateSample(project, project.sampleInputs), selectedRuleId: project.rules[0]?.id, notice: saved ? '已从本地恢复最近项目' : '已载入演示项目，可直接修改并检查规则' });
+      this.publish({ ...this.state, workspace, project, phase: issues.length ? 'validating' : 'editing', persistence: saved ? 'saved' : 'saving', activeModule: 'inspection', checkStatus: issues.length ? 'idle' : 'scheduled', validationIssues: issues, analysis: null, remediationPlan: null, remediationReport: null, sampleEvaluation: evaluateSample(project, project.sampleInputs), selectedRuleId: project.rules[0]?.id, notice: saved ? '已从本地恢复最近项目' : '已载入演示项目，可直接修改并检查规则' });
       if (saved) this.scheduleCheck(40);
       else {
         this.scheduleSave(workspace);
@@ -247,6 +277,8 @@ export class RuleWorkspaceViewModel implements WorkspacePort {
       phase: issues.length ? 'validating' : 'editing', validationIssues: issues,
       checkStatus: issues.length ? 'idle' : recheck ? 'scheduled' : this.state.checkStatus,
       analysis: recheck ? null : this.state.analysis,
+      remediationPlan: recheck ? null : this.state.remediationPlan,
+      remediationReport: recheck ? null : this.state.remediationReport,
       sampleEvaluation: evaluateSample(updated, updated.sampleInputs),
       selectedRuleId: updated.rules.some((rule) => rule.id === this.state.selectedRuleId) ? this.state.selectedRuleId : updated.rules[0]?.id,
       notice,

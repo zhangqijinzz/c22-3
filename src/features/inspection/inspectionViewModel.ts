@@ -11,6 +11,14 @@ export class InspectionViewModel {
     this.workspace.cancelCheck();
   }
 
+  applyRemedies(suggestionIds: string[]): boolean {
+    return this.workspace.applyRemedies(suggestionIds);
+  }
+
+  dismissReport(): void {
+    this.workspace.dismissRemediationReport();
+  }
+
   saveVersion(): void {
     this.workspace.saveVersion();
   }

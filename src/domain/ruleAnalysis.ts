@@ -17,6 +17,7 @@ export function analyzeRules(project: RuleProject): RuleAnalysis {
   const overlaps = new Map<string, RuleOverlap>();
   const seen = new Set<string>();
   const visible = new Set<string>();
+  const shadowedBlockers = new Map<string, string>();
   const processedMatchSets = new Set<string>();
   const uncoveredExamples: SampleInput[] = [];
   const ordered = [...project.rules].sort((a, b) => b.priority - a.priority || project.rules.indexOf(a) - project.rules.indexOf(b));
@@ -44,7 +45,12 @@ export function analyzeRules(project: RuleProject): RuleAnalysis {
     for (const rule of matched) seen.add(rule.id);
     if (matched.length) coveredCases += 1;
     else if (uncoveredExamples.length < MAX_EXAMPLES) uncoveredExamples.push({ ...values });
-    if (matched[0]) visible.add(matched[0].id);
+    if (matched[0]) {
+      visible.add(matched[0].id);
+      for (const loser of matched.slice(1)) {
+        if (!shadowedBlockers.has(loser.id)) shadowedBlockers.set(loser.id, matched[0].id);
+      }
+    }
     const matchSetKey = matched.length > 1 ? matched.map((rule) => rule.id).sort().join('|') : '';
     if (matched.length > 1 && !processedMatchSets.has(matchSetKey)) {
       processedMatchSets.add(matchSetKey);
@@ -69,6 +75,11 @@ export function analyzeRules(project: RuleProject): RuleAnalysis {
   visit(0, {});
   const unreachableRuleIds = project.rules.filter((rule) => !seen.has(rule.id)).map((rule) => rule.id);
   const shadowedRuleIds = project.rules.filter((rule) => seen.has(rule.id) && !visible.has(rule.id)).map((rule) => rule.id);
+  const blockers: Record<string, string> = {};
+  for (const ruleId of shadowedRuleIds) {
+    const blockerId = shadowedBlockers.get(ruleId);
+    if (blockerId) blockers[ruleId] = blockerId;
+  }
 
   return {
     checkedCases,
@@ -77,6 +88,7 @@ export function analyzeRules(project: RuleProject): RuleAnalysis {
     overlaps: [...overlaps.values()],
     unreachableRuleIds,
     shadowedRuleIds,
+    shadowedBlockers: blockers,
     uncoveredExamples,
     truncated,
   };
