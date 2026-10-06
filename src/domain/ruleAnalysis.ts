@@ -13,32 +13,17 @@ const MAX_CASES = 120_000;
 const MAX_EXAMPLES = 4;
 
 export function analyzeRules(project: RuleProject): RuleAnalysis {
-  const candidates = project.fields.map((field) => valuesForField(field, project));
   const overlaps = new Map<string, RuleOverlap>();
   const seen = new Set<string>();
   const visible = new Set<string>();
   const processedMatchSets = new Set<string>();
   const uncoveredExamples: SampleInput[] = [];
   const ordered = [...project.rules].sort((a, b) => b.priority - a.priority || project.rules.indexOf(a) - project.rules.indexOf(b));
+  const { cases, truncated } = enumerateInputCases(project);
   let checkedCases = 0;
   let coveredCases = 0;
-  let truncated = false;
 
-  const visit = (fieldIndex: number, values: SampleInput): void => {
-    if (checkedCases >= MAX_CASES) {
-      truncated = true;
-      return;
-    }
-    if (fieldIndex < project.fields.length) {
-      const field = project.fields[fieldIndex];
-      for (const value of candidates[fieldIndex]) {
-        values[field.id] = value;
-        visit(fieldIndex + 1, values);
-        if (truncated) break;
-      }
-      delete values[field.id];
-      return;
-    }
+  for (const values of cases) {
     checkedCases += 1;
     const matched = ordered.filter((rule) => matchesRule(rule, values));
     for (const rule of matched) seen.add(rule.id);
@@ -64,9 +49,8 @@ export function analyzeRules(project: RuleProject): RuleAnalysis {
         }
       }
     }
-  };
+  }
 
-  visit(0, {});
   const unreachableRuleIds = project.rules.filter((rule) => !seen.has(rule.id)).map((rule) => rule.id);
   const shadowedRuleIds = project.rules.filter((rule) => seen.has(rule.id) && !visible.has(rule.id)).map((rule) => rule.id);
 
@@ -80,6 +64,34 @@ export function analyzeRules(project: RuleProject): RuleAnalysis {
     uncoveredExamples,
     truncated,
   };
+}
+
+export function enumerateInputCases(project: RuleProject): { cases: SampleInput[]; truncated: boolean } {
+  const candidates = project.fields.map((field) => valuesForField(field, project));
+  const total = candidates.reduce((product, values) => product * Math.max(values.length, 1), 1);
+  const cases: SampleInput[] = [];
+  let truncated = false;
+
+  const visit = (fieldIndex: number, values: SampleInput): void => {
+    if (fieldIndex < project.fields.length) {
+      const field = project.fields[fieldIndex];
+      for (const value of candidates[fieldIndex]) {
+        values[field.id] = value;
+        visit(fieldIndex + 1, values);
+        if (truncated) break;
+      }
+      delete values[field.id];
+      return;
+    }
+    if (cases.length >= MAX_CASES) {
+      truncated = true;
+      return;
+    }
+    cases.push({ ...values });
+  };
+
+  visit(0, {});
+  return { cases, truncated: truncated || total > MAX_CASES };
 }
 
 type ScalarCandidate = string | number | boolean;

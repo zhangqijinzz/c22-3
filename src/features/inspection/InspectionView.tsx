@@ -1,4 +1,17 @@
-import type { BusinessRule, RuleAnalysis, RuleProject, RuleVersion, SampleInput } from '../../models/ruleModel';
+import { useEffect, useMemo, useState } from 'react';
+import type {
+  BusinessRule,
+  RuleAnalysis,
+  RuleProject,
+  RuleVersion,
+  SampleInput,
+} from '../../models/ruleModel';
+import type {
+  RemediationKind,
+  RemediationPlan,
+  RemediationReport,
+  RuleRemediation,
+} from '../../domain/ruleRemediation';
 import type { WorkspaceState } from '../../viewmodels/workspaceViewModel';
 import type { InspectionViewModel } from './inspectionViewModel';
 
@@ -9,7 +22,7 @@ export function InspectionView({ state, viewModel, onOpenRule }: InspectionViewP
   const analysis = state.analysis;
   const isChecking = state.checkStatus === 'checking' || state.checkStatus === 'scheduled';
   const rules = project?.rules ?? [];
-  const byId = new Map(rules.map((rule) => [rule.id, rule]));
+  const byId = useMemo(() => new Map(rules.map((rule) => [rule.id, rule])), [rules]);
   return (
     <section className="module-page inspection-page">
       <div className="page-heading">
@@ -20,7 +33,10 @@ export function InspectionView({ state, viewModel, onOpenRule }: InspectionViewP
       {state.validationIssues.length > 0 && <div className="validation-banner"><strong>规则暂时无法检查</strong><span>{state.validationIssues[0].message}</span><button className="text-button" onClick={() => state.validationIssues[0].ruleId ? onOpenRule(state.validationIssues[0].ruleId) : undefined}>{state.validationIssues[0].ruleId ? '打开相关规则 →' : '修复项目定义'}</button></div>}
       {state.checkStatus === 'error' && !state.validationIssues.length && <div className="error-banner">检查失败：{state.notice}</div>}
       {!analysis && !state.validationIssues.length && <div className="loading-analysis card-surface"><div className={isChecking ? 'spinner' : 'analysis-orb'}>{isChecking ? '' : '✳'}</div><div><strong>{isChecking ? '正在分析条件空间' : '准备检查规则集合'}</strong><p>{isChecking ? '计算在独立工作线程中运行，可随时取消。' : '点击“运行一致性检查”查看覆盖与规则关系。'}</p></div>{state.checkStatus === 'success' && <span className="success-mark">✓</span>}</div>}
-      {analysis && <AnalysisPanel analysis={analysis} project={project as RuleProject} byId={byId} onOpenRule={onOpenRule} />}
+      {analysis && project && <>
+        <AnalysisPanel analysis={analysis} project={project} byId={byId} onOpenRule={onOpenRule} />
+        <RemediationPanel plan={state.remediationPlan} report={state.remediationReport} project={project} byId={byId} applying={isChecking} onOpenRule={onOpenRule} onApply={(ids) => viewModel.applyRemediations(ids)} onDismissReport={() => viewModel.dismissReport()} />
+      </>}
 
       <section className="versions-section">
         <div className="versions-heading"><div><span className="eyebrow">CHANGE HISTORY</span><h2>规则版本</h2><p>保存检查前后的结构快照。冻结后，当前规则只能通过复制版本继续修改。</p></div><div className="button-row"><button className="button button-subtle" disabled={!rules.length} onClick={() => viewModel.saveVersion()}>＋ 保存版本</button><button className="button button-outline" disabled={!rules.length || Boolean(project?.frozenVersionId)} onClick={() => viewModel.freeze()}>◈ 冻结当前</button></div></div>
@@ -58,6 +74,177 @@ function AnalysisPanel({ analysis, project, byId, onOpenRule }: AnalysisPanelPro
       </section>
     </div>
   </>;
+}
+
+const remediationLabels: Record<RemediationKind, { tag: string; icon: string }> = {
+  'reorder-priority': { tag: '调整顺序', icon: '↕' },
+  'narrow-interval': { tag: '收窄区间', icon: '◞' },
+  'merge-rules': { tag: '合并规则', icon: '⧉' },
+  'widen-interval': { tag: '放宽区间', icon: '◟' },
+  'remove-rule': { tag: '删除规则', icon: '×' },
+};
+
+interface RemediationPanelProps {
+  plan: RemediationPlan | null;
+  report: RemediationReport | null;
+  project: RuleProject;
+  byId: Map<string, BusinessRule>;
+  applying: boolean;
+  onOpenRule: (ruleId: string) => void;
+  onApply: (ids: string[]) => void;
+  onDismissReport: () => void;
+}
+
+function RemediationPanel({ plan, report, project, byId, applying, onOpenRule, onApply, onDismissReport }: RemediationPanelProps) {
+  const remediations = plan?.remediations ?? [];
+  const [selected, setSelected] = useState<Set<string>>(new Set());
+
+  useEffect(() => {
+    setSelected((current) => {
+      const validIds = new Set(remediations.map((item) => item.id));
+      const retained = [...current].filter((id) => validIds.has(id));
+      return retained.length === current.size ? current : new Set(retained);
+    });
+  }, [remediations]);
+
+  if (!plan) return null;
+
+  const toggle = (id: string) => {
+    setSelected((current) => {
+      const next = new Set(current);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+      return next;
+    });
+  };
+  const allSelected = remediations.length > 0 && selected.size === remediations.length;
+  const toggleAll = () => setSelected(allSelected ? new Set() : new Set(remediations.map((item) => item.id)));
+  const frozen = Boolean(project.frozenVersionId);
+
+  return (
+    <section className="remediation-section">
+      <header className="remediation-heading">
+        <div>
+          <span className="eyebrow">ACTIONABLE FIXES</span>
+          <h2>处置视图</h2>
+          <p>每条建议都已模拟落地并重算验证：不降低覆盖率、不引入新的冲突。勾选后一次性应用，随即自动重新检查；未勾选的规则不会被改动。</p>
+        </div>
+        <div className="button-row">
+          {remediations.length > 0 && <button className="button button-subtle" onClick={toggleAll}>{allSelected ? '取消全选' : '全选建议'}</button>}
+          <button className="button button-primary" disabled={selected.size === 0 || frozen || applying} onClick={() => onApply([...selected])}><span>✓</span> 应用 {selected.size > 0 ? `${selected.size} 条` : ''}建议并重算</button>
+        </div>
+      </header>
+
+      {frozen && <div className="frozen-notice">◈ 当前项目已冻结，请先从版本记录复制一份再应用处置。</div>}
+
+      {report && <RemediationReportCard report={report} onDismiss={onDismissReport} />}
+
+      {remediations.length === 0 ? (
+        <div className="remediation-empty card-surface"><span className="success-mark">✓</span><div><strong>暂时没有可自动处置的问题</strong><p>{plan.manualIssueCount > 0 ? `仍有 ${plan.manualIssueCount} 个问题需要人工判断（如跨多个字段的区间重叠），可在规则工作台直接调整。` : '当前检查结果没有需要调整的规则关系；可继续编辑后重新检查。'}</p></div></div>
+      ) : (
+        <div className="remediation-list">
+          {remediations.map((remediation) => (
+            <RemediationRow
+              key={remediation.id}
+              remediation={remediation}
+              checked={selected.has(remediation.id)}
+              applied={report?.appliedIds.includes(remediation.id) ?? false}
+              ruleName={(id: string) => byId.get(id)?.name ?? id}
+              onToggle={() => toggle(remediation.id)}
+              onOpenRule={onOpenRule}
+            />
+          ))}
+        </div>
+      )}
+      {plan.manualIssueCount > 0 && remediations.length > 0 && <p className="remediation-manual-note">另有 {plan.manualIssueCount} 个问题涉及多字段或枚举/布尔组合，无法安全自动改写，请到规则工作台人工调整。</p>}
+    </section>
+  );
+}
+
+interface RemediationRowProps {
+  remediation: RuleRemediation;
+  checked: boolean;
+  applied: boolean;
+  ruleName: (id: string) => string;
+  onToggle: () => void;
+  onOpenRule: (ruleId: string) => void;
+}
+
+function RemediationRow({ remediation, checked, applied, ruleName, onToggle, onOpenRule }: RemediationRowProps) {
+  const label = remediationLabels[remediation.kind];
+  const severityClass = remediation.issueType === 'conflict'
+    ? 'severity-danger'
+    : remediation.issueType === 'unreachable'
+      ? 'severity-neutral'
+      : 'severity-warn';
+  return (
+    <article className={`remediation-card card-surface${checked ? ' remediation-checked' : ''}${applied ? ' remediation-applied' : ''}`}>
+      <label className="remediation-check">
+        <input type="checkbox" checked={checked || applied} disabled={applied} onChange={onToggle} />
+        <span />
+      </label>
+      <div className="remediation-body">
+        <div className="remediation-card-heading">
+          <span className="remediation-kind-tag"><i>{label.icon}</i>{label.tag}</span>
+          <strong>{remediation.title}</strong>
+          <span className={`severity-tag ${severityClass}`}>{issueLabel(remediation.issueType)}</span>
+          {applied && <span className="severity-tag severity-applied">已应用</span>}
+        </div>
+        <p>{remediation.description}</p>
+        <div className="remediation-rule-links">
+          {remediation.ruleIds.map((id) => <button key={id} className="inline-rule-link" onClick={() => onOpenRule(id)}>{ruleName(id)} →</button>)}
+        </div>
+      </div>
+    </article>
+  );
+}
+
+function issueLabel(issueType: RuleRemediation['issueType']): string {
+  switch (issueType) {
+    case 'conflict': return '同优先级冲突';
+    case 'overlap': return '条件重叠';
+    case 'shadowed': return '被遮蔽';
+    case 'unreachable': return '不可达';
+  }
+}
+
+function RemediationReportCard({ report, onDismiss }: { report: RemediationReport; onDismiss: () => void }) {
+  const metrics: { label: string; before: number; after: number; suffix?: string }[] = [
+    { label: '输入空间覆盖率', before: report.before.coveragePercent, after: report.after.coveragePercent, suffix: '%' },
+    { label: '同优先级冲突', before: report.before.conflictCount, after: report.after.conflictCount, suffix: ' 个' },
+    { label: '不可达规则', before: report.before.unreachableCount, after: report.after.unreachableCount, suffix: ' 条' },
+    { label: '被遮蔽规则', before: report.before.shadowedCount, after: report.after.shadowedCount, suffix: ' 条' },
+  ];
+  return (
+    <div className="remediation-report card-surface" role="status">
+      <div className="remediation-report-head">
+        <strong><span className="success-mark">✓</span> 已应用 {report.appliedIds.length} 条处置并自动重算</strong>
+        <button className="text-button" onClick={onDismiss}>收起对比</button>
+      </div>
+      <div className="remediation-report-metrics">
+        {metrics.map((metric) => <MetricDelta key={metric.label} label={metric.label} before={metric.before} after={metric.after} suffix={metric.suffix} />)}
+      </div>
+      <details className="remediation-report-detail">
+        <summary>本次应用的处置</summary>
+        <ul>{report.appliedTitles.map((title) => <li key={title}>{title}</li>)}</ul>
+      </details>
+    </div>
+  );
+}
+
+function MetricDelta({ label, before, after, suffix = '' }: { label: string; before: number; after: number; suffix?: string }) {
+  const diff = after - before;
+  const unchanged = diff === 0;
+  const positive = label.includes('覆盖') ? diff >= 0 : diff <= 0;
+  const tone = unchanged ? 'delta-same' : positive ? 'delta-good' : 'delta-bad';
+  const arrow = unchanged ? '→' : diff > 0 ? '↑' : '↓';
+  return (
+    <div className={`metric-delta ${tone}`}>
+      <span>{label}</span>
+      <strong>{before}{suffix} <i>{arrow}</i> {after}{suffix}</strong>
+      <small>{unchanged ? '无变化' : `${diff > 0 ? '+' : ''}${diff}${suffix}`}</small>
+    </div>
+  );
 }
 
 function MetricCard({ label, value, detail, icon, tone }: { label: string; value: string; detail: string; icon: string; tone: string }) {

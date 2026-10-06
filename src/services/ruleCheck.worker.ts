@@ -1,5 +1,6 @@
 import type { RuleProject } from '../models/ruleModel';
 import { analyzeRules } from '../domain/ruleAnalysis';
+import { buildRemediationPlan } from '../domain/ruleRemediation';
 
 interface CheckRequest {
   requestId: number;
@@ -9,7 +10,8 @@ interface CheckRequest {
 self.onmessage = (event: MessageEvent<CheckRequest>) => {
   try {
     const analysis = analyzeRules(event.data.project);
-    self.postMessage({ requestId: event.data.requestId, analysis });
+    const remediationPlan = buildRemediationPlan(event.data.project, analysis);
+    self.postMessage({ requestId: event.data.requestId, analysis, remediationPlan });
   } catch (error) {
     self.postMessage({
       requestId: event.data.requestId,

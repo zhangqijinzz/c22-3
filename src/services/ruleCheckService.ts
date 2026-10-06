@@ -1,8 +1,14 @@
 import type { RuleAnalysis, RuleProject } from '../models/ruleModel';
+import type { RemediationPlan } from '../domain/ruleRemediation';
 import RuleCheckWorker from './ruleCheck.worker?worker';
 
+export interface CheckResult {
+  analysis: RuleAnalysis;
+  remediationPlan?: RemediationPlan;
+}
+
 export interface CheckOperation {
-  promise: Promise<RuleAnalysis>;
+  promise: Promise<CheckResult>;
   cancel: () => void;
 }
 
@@ -14,13 +20,13 @@ export class RuleCheckService {
     const requestId = this.nextRequestId++;
     let rejectPending: (reason: Error) => void = () => undefined;
     let settled = false;
-    const promise = new Promise<RuleAnalysis>((resolve, reject) => {
+    const promise = new Promise<CheckResult>((resolve, reject) => {
       rejectPending = reject;
-      worker.onmessage = (event: MessageEvent<{ requestId: number; analysis?: RuleAnalysis; error?: string }>) => {
+      worker.onmessage = (event: MessageEvent<{ requestId: number; analysis?: RuleAnalysis; remediationPlan?: RemediationPlan; error?: string }>) => {
         if (event.data.requestId !== requestId) return;
         settled = true;
         worker.terminate();
-        if (event.data.analysis) resolve(event.data.analysis);
+        if (event.data.analysis) resolve({ analysis: event.data.analysis, remediationPlan: event.data.remediationPlan });
         else reject(new Error(event.data.error ?? '规则分析失败'));
       };
       worker.onerror = (event) => {

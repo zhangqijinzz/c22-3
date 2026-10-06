@@ -22,7 +22,7 @@ class FakeChecker {
       this.nextError = null;
       return { promise: Promise.reject(error), cancel: () => { this.cancelled = true; } };
     }
-    return { promise: Promise.resolve(analyzeRules(project)), cancel: () => { this.cancelled = true; } };
+    return { promise: Promise.resolve({ analysis: analyzeRules(project) }), cancel: () => { this.cancelled = true; } };
   }
 }
 
